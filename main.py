@@ -20,7 +20,7 @@ log = logging.getLogger("kp-bot-branch")
 # =========================
 # НАСТРОЙКИ
 # =========================
-TOKEN = os.getenv("TELEGRAM_TOKEN", '8068452070:AAFLDvT5HMKOQfhK5tcOD1zAJfmP84cmAvI')
+TOKEN = os.getenv("TELEGRAM_TOKEN", '---------')
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 path_wkhtmltopdf = r"C:/Program Files/wkhtmltopdf/bin/wkhtmltopdf.exe"
