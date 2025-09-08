@@ -20,7 +20,7 @@ log = logging.getLogger("kp-bot-branch")
 # =========================
 # НАСТРОЙКИ
 # =========================
-TOKEN = os.getenv("TELEGRAM_TOKEN", 'TELEGRAM_TOKEN')
+TOKEN = os.getenv("TELEGRAM_TOKEN", '8068452070:AAFLDvT5HMKOQfhK5tcOD1zAJfmP84cmAvI')
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 path_wkhtmltopdf = r"C:/Program Files/wkhtmltopdf/bin/wkhtmltopdf.exe"
@@ -1337,20 +1337,26 @@ def render_branch_for_pdf(d: dict, solution: str):
     if 'D4_budget' in d: out["Бюджет"] = pretty_items(d['D4_budget'])
     return out
 
-def make_pdf(ch: int):
-    ctx = build_kp_context(ch)
-    html = Template(KP_TEMPLATE).render(**ctx)
-    out = f"KP_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+def make_kp_html(ch: int) -> str:
+    ctx = build_kp_context(ch)                           # уже есть в коде
+    html_text = Template(KP_TEMPLATE).render(**ctx)      # KP_TEMPLATE уже есть
 
-    try:
-        config = pdfkit_config_or_fail()  # если у тебя есть автопоиск
-    except NameError:
-        config = pdfkit.configuration(wkhtmltopdf=path_wkhtmltopdf)
+    out_dir = os.path.join(os.getcwd(), "generated_kp")
+    os.makedirs(out_dir, exist_ok=True)
 
-    pdfkit.from_string(html, out, configuration=config, options={"encoding":"UTF-8","quiet":""})
-    return out
+    raw_contacts = USER[ch]["data"].get("contacts", "")  # вытаскиваем телефон
+    phone = re.sub(r"\D", "", raw_contacts) or "unknown"
 
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")     # дата+время, чтобы не перезатирать
+    out_path = os.path.join(out_dir, f"KP_{phone}_{stamp}.html")
 
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(html_text)
+    return out_path
+
+def make_pdf(ch: int) -> str:
+    # теперь PDF не генерим, возвращаем путь к HTML
+    return make_kp_html(ch)
 
 # =========================
 # ПОТОК/ВЕТКИ
@@ -1587,20 +1593,18 @@ def on_cb(c):
             return
 
         # pdf
-        if data == "go_pdf":
-            status = send_temp(ch, "⏳ Генерирую PDF…", ttl=60)  # на всякий случай автоудаление
+        if data in ("go_pdf", "go_kp"):
             try:
-                path = make_pdf(ch)
-                safe_delete(ch, status.message_id)  # удалим сразу, как только готово
+                path = make_kp_html(ch)  # или make_pdf(ch) — без разницы, оба дадут HTML
                 with open(path, "rb") as f:
-                    bot.send_document(ch, f, caption="✅ Ваше коммерческое предложение готово!")
-                manager_kb = types.InlineKeyboardMarkup()
-                manager_kb.add(types.InlineKeyboardButton("📞 Связаться с менеджером", url="https://t.me/PlaBarov"))
-                bot.send_message(ch, "Если остались вопросы — напишите менеджеру:", reply_markup=manager_kb)
-            except Exception:
-                log.exception("pdf error")
-                safe_delete(ch, status.message_id)
-                send_temp(ch, "⚠️ Ошибка при генерации PDF. Проверьте wkhtmltopdf.", ttl=8)
+                    bot.send_document(
+                        ch, f,
+                        visible_file_name=os.path.basename(path),
+                        caption="Готово ✅ (HTML)"
+                    )
+            except Exception as e:
+                log.error(f"make_kp_html failed: {e}")
+                bot.send_message(ch, "Не удалось сформировать файл. Сообщите менеджеру, пожалуйста.")
             return
 
     except Exception:
