@@ -20,7 +20,7 @@ log = logging.getLogger("kp-bot-branch")
 # =========================
 # НАСТРОЙКИ
 # =========================
-TOKEN = os.getenv("TELEGRAM_TOKEN", 'TELEGRAM_TOKEN')
+TOKEN = os.getenv("TELEGRAM_TOKEN", '8068452070:AAFLDvT5HMKOQfhK5tcOD1zAJfmP84cmAvI')
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 path_wkhtmltopdf = r"C:/Program Files/wkhtmltopdf/bin/wkhtmltopdf.exe"
@@ -999,12 +999,14 @@ def send_step(ch: int, step_key: str, mid: int = None, edit: bool = False):
 
     if step_key == 'confirm':
         d = USER[ch]["data"]
-        tl_code = (d.get("timeline") or {}).get("items", [None])
-        if isinstance(tl_code, list): tl_code = tl_code[0]
+        tl_items = (d.get("timeline") or {}).get("items") or []
+        tl_code = tl_items[0] if tl_items else None
         tl_label = LABELS["timeline"].get(tl_code, "—")
         design_text = ", ".join(humanize_list("design", (d.get("design") or {}).get("items", []))) or "—"
         content_text = ", ".join(humanize_list("content", (d.get("content") or {}).get("items", []))) or "—"
-        budget_text = LABELS["D4_budget"].get((d.get("D4_budget") or {}).get("items", [None])[0], "—")
+        budget_items = (d.get("D4_budget") or {}).get("items") or []
+        budget_code = budget_items[0] if budget_items else None
+        budget_text = LABELS["D4_budget"].get(budget_code, "—")
 
         name = d.get("name", "—")
         s = [
@@ -1029,7 +1031,7 @@ def send_step(ch: int, step_key: str, mid: int = None, edit: bool = False):
         title = NT('confirm', '<b>Проверьте данные:</b>')
         _send(
             f"{render_for_step(ch, 'confirm')}{framed(title)}\n" + "\n".join(s),
-            kb([types.InlineKeyboardButton(f"{EMOJI['confirm']} Скачать КП (PDF)", callback_data="go_pdf")],
+            kb([types.InlineKeyboardButton(f"{EMOJI['confirm']} Создать КП", callback_data="go_pdf")],
                add_home=True)
         )
         return
@@ -1269,9 +1271,8 @@ def build_kp_context(ch: int):
     has_manager_options = any(x["price"] == "manager" for x in options)
 
     # сроки: из мультивыбора 'timeline' приходит код ('1-2w'/'2-4w'/'1-2m'/'2-4m')
-    tl_code = (d.get("timeline") or {}).get("items", [None])
-    if isinstance(tl_code, list):  # single-select хранится как список из одного кода
-        tl_code = tl_code[0]
+    tl_items = (d.get("timeline") or {}).get("items") or [None]
+    tl_code = tl_items[0]
 
     timeline_map = {
         "1-2w": "1–2 недели",
@@ -1338,17 +1339,30 @@ def render_branch_for_pdf(d: dict, solution: str):
     return out
 
 def make_kp_html(ch: int) -> str:
-    ctx = build_kp_context(ch)                           # уже есть в коде
-    html_text = Template(KP_TEMPLATE).render(**ctx)      # KP_TEMPLATE уже есть
+    from glob import glob
+
+    ctx = build_kp_context(ch)
+    html_text = Template(KP_TEMPLATE).render(**ctx)
 
     out_dir = os.path.join(os.getcwd(), "generated_kp")
     os.makedirs(out_dir, exist_ok=True)
 
-    raw_contacts = USER[ch]["data"].get("contacts", "")  # вытаскиваем телефон
+    # телефон из контактов (только цифры)
+    raw_contacts = USER[ch]["data"].get("contacts", "")
     phone = re.sub(r"\D", "", raw_contacts) or "unknown"
 
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")     # дата+время, чтобы не перезатирать
-    out_path = os.path.join(out_dir, f"KP_{phone}_{stamp}.html")
+    # дата как ГГГГММДД
+    date_str = datetime.now().strftime("%Y%m%d")
+
+    # считаем, сколько уже создано файлов этим пользователем за сегодня
+    pattern = os.path.join(out_dir, f"KP_{phone}_{date_str}_*.html")
+    seq = len(glob(pattern)) + 1  # следующий номер
+
+    # на всякий случай — если файл вдруг существует, ищем следующий свободный номер
+    out_path = os.path.join(out_dir, f"KP_{phone}_{date_str}_{seq}.html")
+    while os.path.exists(out_path):
+        seq += 1
+        out_path = os.path.join(out_dir, f"KP_{phone}_{date_str}_{seq}.html")
 
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html_text)
@@ -1595,18 +1609,25 @@ def on_cb(c):
         # pdf
         if data in ("go_pdf", "go_kp"):
             try:
-                path = make_kp_html(ch)  # или make_pdf(ch) — без разницы, оба дадут HTML
+                path = make_kp_html(ch)
                 with open(path, "rb") as f:
                     bot.send_document(
                         ch, f,
                         visible_file_name=os.path.basename(path),
-                        caption="Готово ✅ (HTML)"
+                        caption="✅ Ваше коммерческое предложение готово!"
                     )
+                # 👇 Добавляем сообщение про менеджера
+                mgr_kb = types.InlineKeyboardMarkup()
+                mgr_kb.add(types.InlineKeyboardButton("📞 Связаться с менеджером", url="https://t.me/PlaBarov"))
+                bot.send_message(
+                    ch,
+                    "Если остались вопросы — напишите менеджеру:",
+                    reply_markup=mgr_kb
+                )
             except Exception as e:
                 log.error(f"make_kp_html failed: {e}")
                 bot.send_message(ch, "Не удалось сформировать файл. Сообщите менеджеру, пожалуйста.")
             return
-
     except Exception:
         log.exception("callback error")
 
