@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<h4 class="mb-3">Настройки</h4>
+<div class="card text-bg-dark border-success">
+  <div class="card-body">
+    <div class="mb-2"><strong>BOT_TOKEN:</strong> {{ cfg.BOT_TOKEN or "—" }}</div>
+    <div class="mb-2"><strong>UPLOAD_FOLDER:</strong> {{ cfg.UPLOAD_FOLDER }}</div>
+    <div class="mb-2"><strong>API_KEY:</strong> {{ cfg.API_KEY or "—" }}</div>
+    <p class="text-muted mb-0">Это заглушка страницы. Функционал сохранения добавим позже.</p>
+  </div>
+</div>
+{% endblock %}

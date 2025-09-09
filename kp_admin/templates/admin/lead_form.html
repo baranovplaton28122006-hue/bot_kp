@@ -1,0 +1,68 @@
+
+{% extends "base.html" %}
+{% block content %}
+<form method="post">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h4 class="mb-0">{{ 'Новый лид' if not lead else ('Лид #' ~ lead.id) }}</h4>
+    {% if lead %}
+    <div class="d-flex gap-2">
+      <a class="btn btn-outline-secondary" href="{{ url_for('routes.lead_export_json', lead_id=lead.id) }}">Экспорт JSON</a>
+      <button class="btn btn-success" formaction="{{ url_for('routes.kp_generate', lead_id=lead.id) }}" formmethod="post">Сгенерировать КП</button>
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="row g-3">
+    <div class="col-md-6">
+      <label class="form-label">Компания</label>
+      <input class="form-control" name="company" value="{{ lead.company if lead else '' }}">
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">Контактное лицо</label>
+      <input class="form-control" name="contact_name" value="{{ lead.contact_name if lead else '' }}">
+    </div>
+    <div class="col-md-4">
+      <label class="form-label">Телефон</label>
+      <input class="form-control" name="phone" value="{{ lead.phone if lead else '' }}">
+    </div>
+    <div class="col-md-4">
+      <label class="form-label">Email</label>
+      <input class="form-control" type="email" name="email" value="{{ lead.email if lead else '' }}">
+    </div>
+    <div class="col-md-4">
+      <label class="form-label">Тип сайта</label>
+      <input class="form-control" name="site_type" value="{{ lead.site_type if lead else '' }}">
+    </div>
+    <div class="col-md-4">
+      <label class="form-label">Цель</label>
+      <input class="form-control" name="goal" value="{{ lead.goal if lead else '' }}">
+    </div>
+    <div class="col-md-4">
+      <label class="form-label">Аудитория</label>
+      <input class="form-control" name="audience" value="{{ lead.audience if lead else '' }}">
+    </div>
+    <div class="col-md-4">
+      <label class="form-label">Бюджет</label>
+      <input class="form-control" name="budget" value="{{ lead.budget if lead else '' }}">
+    </div>
+    <div class="col-md-4">
+      <label class="form-label">Срок</label>
+      <input class="form-control" name="deadline" value="{{ lead.deadline if lead else '' }}">
+    </div>
+    <div class="col-12">
+      <label class="form-label">Примечания</label>
+      <textarea class="form-control" name="notes" rows="4">{{ lead.notes if lead else '' }}</textarea>
+    </div>
+  </div>
+
+  <div class="mt-3 d-flex gap-2">
+    <button class="btn btn-success" type="submit">Сохранить</button>
+    <a class="btn btn-outline-secondary" href="{{ url_for('routes.leads') }}">Назад</a>
+    {% if lead %}
+    <form method="post" action="{{ url_for('routes.lead_delete', lead_id=lead.id) }}">
+      <button class="btn btn-outline-danger">Удалить</button>
+    </form>
+    {% endif %}
+  </div>
+</form>
+{% endblock %}

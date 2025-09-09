@@ -1,0 +1,12 @@
+
+/* Minor polish */
+.table td, .table th { vertical-align: middle; }
+.btn { border-radius: 10px; }
+.card { border-radius: 14px; }
+
+body { background: #0b1220 url('https://images.unsplash.com/photo-1444703686981-a3abbc4d4fe3?q=80&w=2070&auto=format&fit=crop') center/cover fixed; }
+.card { border-radius: 14px; }
+.table td, .table th { vertical-align: middle; }
+.btn { border-radius: 10px; }
+.navbar { box-shadow: 0 2px 10px rgba(0,0,0,.3); }
+.list-group-item { background-color: rgba(0,0,0,.25); color: #e6e6e6; }

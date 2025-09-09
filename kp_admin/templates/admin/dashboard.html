@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block content %}
+<h4 class="mb-3">Панель управления</h4>
+
+<div class="row g-3">
+  <div class="col-6 col-lg-3">
+    <div class="card text-bg-dark border-success">
+      <div class="card-body">
+        <div class="fw-bold">Лидов</div>
+        <div class="display-6">{{ leads_count }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="card text-bg-dark border-success">
+      <div class="card-body">
+        <div class="fw-bold">КП-файлов</div>
+        <div class="display-6">{{ kps_count }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="card text-bg-dark border-success">
+      <div class="card-body">
+        <div class="fw-bold">Уник. телефонов</div>
+        <div class="display-6">{{ uniq_phones }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="card text-bg-dark border-success">
+      <div class="card-body">
+        <div class="fw-bold">Уник. email</div>
+        <div class="display-6">{{ uniq_emails }}</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3 mt-1">
+  <div class="col-12 col-lg-7">
+    <div class="card text-bg-dark border-success">
+      <div class="card-header">КП и лиды по дням</div>
+      <div class="card-body">
+        <canvas id="chartCounts"></canvas>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-5">
+    <div class="card text-bg-dark border-success">
+      <div class="card-header">Последние КП</div>
+      <div class="card-body">
+        <ul class="list-group">
+          {% for k in latest_kps %}
+          <li class="list-group-item d-flex justify-content-between align-items-center">
+            <span>{{ k.filename }}</span>
+            <a class="btn btn-sm btn-outline-success" href="{{ url_for('routes.kp_download', kp_id=k.id) }}">Скачать</a>
+          </li>
+          {% else %}
+          <li class="list-group-item">Пусто</li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+fetch("{{ url_for('routes.stats_counts') }}")
+ .then(r=>r.json())
+ .then(d=>{
+   const ctx = document.getElementById('chartCounts');
+   new Chart(ctx, { type:'line',
+     data:{ labels:d.labels, datasets:[
+       {label:'Лиды', data:d.leads},
+       {label:'КП', data:d.kps}
+     ]},
+     options:{ responsive:true }
+   });
+ });
+</script>
+{% endblock %}

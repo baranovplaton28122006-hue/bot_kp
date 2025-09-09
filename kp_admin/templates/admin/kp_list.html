@@ -1,0 +1,62 @@
+
+{% extends "base.html" %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0">КП‑файлы</h4>
+  <form class="d-flex gap-2" method="post" action="{{ url_for('routes.kp_upload') }}" enctype="multipart/form-data">
+    <input type="file" class="form-control" name="file" required>
+    <button class="btn btn-success" type="submit">Загрузить</button>
+  </form>
+</div>
+
+<form method="post" action="{{ url_for('routes.bulk_delete') }}">
+<table class="table table-striped align-middle">
+  <thead>
+    <tr>
+      <th style="width:32px;"><input type="checkbox" onclick="document.querySelectorAll('input[name=ids]').forEach(cb=>cb.checked=this.checked)"></th>
+      <th>ID</th>
+      <th>Имя файла</th>
+      <th>Размер</th>
+      <th>Тип</th>
+      <th>Создан</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for k in items %}
+    <tr>
+      <td><input type="checkbox" name="ids" value="{{ k.id }}"></td>
+      <td>{{ k.id }}</td>
+      <td>{{ k.filename }}</td>
+      <td>{{ (k.size_bytes // 1024) }} КБ</td>
+      <td>{{ k.mimetype }}</td>
+      <td>{{ k.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+      <td class="text-end">
+        <a class="btn btn-sm btn-outline-success" href="{{ url_for('routes.kp_download', kp_id=k.id) }}">Скачать</a>
+        <form method="post" action="{{ url_for('routes.kp_delete', kp_id=k.id) }}" class="d-inline">
+          <button class="btn btn-sm btn-outline-danger">Удалить</button>
+        </form>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7" class="text-center text-muted">Нет файлов</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<div class="d-flex justify-content-between align-items-center">
+  <div>
+    <button class="btn btn-outline-danger btn-sm" type="submit">Удалить выбранные</button>
+  </div>
+  <nav>
+    <ul class="pagination mb-0">
+      {% for p in range(1, pages+1) %}
+      <li class="page-item {% if p==page %}active{% endif %}">
+        <a class="page-link" href="?page={{ p }}">{{ p }}</a>
+      </li>
+      {% endfor %}
+    </ul>
+  </nav>
+</div>
+</form>
+{% endblock %}
