@@ -1,54 +1,24 @@
-
-from kp_admin import create_app, db
-from kp_admin.models import User, Lead, KPFile
 import click
+from kp_admin import create_app, db
 
+# ВАЖНО: создаём приложение и регистрируем команды на нём
 app = create_app()
 
-@app.shell_context_processor
-def shell():
-    return {"db": db, "User": User, "Lead": Lead, "KPFile": KPFile}
+# импортируем после create_app, чтобы не схватить циклические импорты
+from kp_admin.routes import rescan_new_files  # noqa: E402  (используем готовую логику сканирования)
 
-@app.cli.command("create-admin")
-@app.cli.command("list-users")
-def list_users():
-    from app.models import User
-    print([u.email for u in User.query.all()])
 
-@app.cli.command("set-password")
+@app.cli.command("init-db")
+def init_db():
+    """Создать таблицы базы данных (если их ещё нет)."""
+    with app.app_context():
+        db.create_all()
+        click.echo("DB ready")
 
-@app.cli.command("create-admin")
-@click.option("--email", required=True)
-@click.option("--password", required=True)
-def create_admin(email, password):
-    if User.query.filter_by(email=email).first():
-        click.echo("User already exists")
-        return
-    u = User(email=email)
-    u.set_password(password)
-    db.session.add(u)
-    db.session.commit()
-    click.echo(f"Admin created: {email}")
 
-@click.option("--email", required=True)
-@click.option("--password", required=True)
-def set_password(email, password):
-    from app.models import User, db
-    u = User.query.filter_by(email=email).first()
-    if not u:
-        print("User not found")
-        return
-    u.set_password(password)
-    db.session.commit()
-    print("Password updated")
-@click.option("--email", required=True)
-@click.option("--password", required=True)
-def create_admin(email, password):
-    if User.query.filter_by(email=email).first():
-        click.echo("User already exists")
-        return
-    u = User(email=email)
-    u.set_password(password)
-    db.session.add(u)
-    db.session.commit()
-    click.echo(f"Admin created: {email}")
+@app.cli.command("scan-kp")
+def scan_kp():
+    """Просканировать папку с КП и добавить новые файлы в БД."""
+    with app.app_context():
+        added = rescan_new_files(silent=True)
+        click.echo(f"Импортировано файлов: {added}")

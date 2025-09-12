@@ -1,62 +1,191 @@
-
 {% extends "base.html" %}
+{% block title %}КП — список{% endblock %}
+
 {% block content %}
-<div class="d-flex justify-content-between align-items-center mb-3">
-  <h4 class="mb-0">КП‑файлы</h4>
-  <form class="d-flex gap-2" method="post" action="{{ url_for('routes.kp_upload') }}" enctype="multipart/form-data">
-    <input type="file" class="form-control" name="file" required>
-    <button class="btn btn-success" type="submit">Загрузить</button>
+<div class="container-fluid py-3">
+
+  <h5 class="mb-3">КП — список</h5>
+
+  <!-- Фильтры -->
+  <form class="row g-2 align-items-end mb-3" method="get" action="{{ url_for('kp.kp_list') }}">
+    <div class="col-12 col-sm-4 col-lg-3">
+      <label class="form-label mb-1">Телефон</label>
+      <input type="text" class="form-control" name="phone" placeholder="+7..."
+             value="{{ phone_value }}">
+    </div>
+
+    <div class="col-6 col-sm-3 col-lg-2">
+      <label class="form-label mb-1">Дата с</label>
+      <input type="date" class="form-control" name="date_from" value="{{ date_from_iso }}">
+    </div>
+
+    <div class="col-6 col-sm-3 col-lg-2">
+      <label class="form-label mb-1">Дата по</label>
+      <input type="date" class="form-control" name="date_to" value="{{ date_to_iso }}">
+    </div>
+
+    <div class="col-12 d-flex flex-wrap gap-2">
+      <button type="submit" class="btn btn-success">Применить</button>
+      <a href="{{ url_for('kp.kp_list') }}" class="btn btn-outline-secondary">Сброс</a>
+      <a href="{{ url_for('kp.kp_csv', **request.args) }}" class="btn btn-outline-primary">CSV</a>
+      <a href="{{ url_for('kp.kp_xlsx', **request.args) }}" class="btn btn-success">Excel</a>
+
+
+      <!-- Быстрые пресеты -->
+      <div class="ms-sm-auto d-flex flex-wrap gap-2">
+        <button class="btn btn-sm btn-outline-dark" type="button" data-range="today">Сегодня</button>
+        <button class="btn btn-sm btn-outline-dark" type="button" data-range="yesterday">Вчера</button>
+        <button class="btn btn-sm btn-outline-dark" type="button" data-range="7">7д</button>
+        <button class="btn btn-sm btn-outline-dark" type="button" data-range="30">30д</button>
+      </div>
+
+      <!-- Рескан -->
+      <form method="post" action="{{ url_for('kp.kp_rescan', **request.args) }}" class="ms-sm-auto">
+        <button type="submit" class="btn btn-warning">Сканировать папку и добавить новые файлы</button>
+      </form>
+    </div>
   </form>
-</div>
 
-<form method="post" action="{{ url_for('routes.bulk_delete') }}">
-<table class="table table-striped align-middle">
-  <thead>
-    <tr>
-      <th style="width:32px;"><input type="checkbox" onclick="document.querySelectorAll('input[name=ids]').forEach(cb=>cb.checked=this.checked)"></th>
-      <th>ID</th>
-      <th>Имя файла</th>
-      <th>Размер</th>
-      <th>Тип</th>
-      <th>Создан</th>
-      <th></th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for k in items %}
-    <tr>
-      <td><input type="checkbox" name="ids" value="{{ k.id }}"></td>
-      <td>{{ k.id }}</td>
-      <td>{{ k.filename }}</td>
-      <td>{{ (k.size_bytes // 1024) }} КБ</td>
-      <td>{{ k.mimetype }}</td>
-      <td>{{ k.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
-      <td class="text-end">
-        <a class="btn btn-sm btn-outline-success" href="{{ url_for('routes.kp_download', kp_id=k.id) }}">Скачать</a>
-        <form method="post" action="{{ url_for('routes.kp_delete', kp_id=k.id) }}" class="d-inline">
-          <button class="btn btn-sm btn-outline-danger">Удалить</button>
-        </form>
-      </td>
-    </tr>
-    {% else %}
-    <tr><td colspan="7" class="text-center text-muted">Нет файлов</td></tr>
-    {% endfor %}
-  </tbody>
-</table>
-
-<div class="d-flex justify-content-between align-items-center">
-  <div>
-    <button class="btn btn-outline-danger btn-sm" type="submit">Удалить выбранные</button>
+  <!-- Стат-карточки -->
+  <div class="row g-2 mb-3">
+    <div class="col-6 col-sm-4 col-lg-2">
+      <div class="card"><div class="card-body text-center">
+        <div class="small text-muted">Сегодня</div>
+        <div class="fs-4">{{ stat.today or 0 }}</div>
+      </div></div>
+    </div>
+    <div class="col-6 col-sm-4 col-lg-2">
+      <div class="card"><div class="card-body text-center">
+        <div class="small text-muted">7 дней</div>
+        <div class="fs-4">{{ stat.w7 or 0 }}</div>
+      </div></div>
+    </div>
+    <div class="col-6 col-sm-4 col-lg-2">
+      <div class="card"><div class="card-body text-center">
+        <div class="small text-muted">30 дней</div>
+        <div class="fs-4">{{ stat.w30 or 0 }}</div>
+      </div></div>
+    </div>
+    <div class="col-6 col-sm-4 col-lg-2">
+      <div class="card"><div class="card-body text-center">
+        <div class="small text-muted">90 дней</div>
+        <div class="fs-4">{{ stat.w90 or 0 }}</div>
+      </div></div>
+    </div>
+    <div class="col-6 col-sm-4 col-lg-2">
+      <div class="card"><div class="card-body text-center">
+        <div class="small text-muted">Всего</div>
+        <div class="fs-4">{{ stat.all or 0 }}</div>
+      </div></div>
+    </div>
   </div>
-  <nav>
-    <ul class="pagination mb-0">
-      {% for p in range(1, pages+1) %}
-      <li class="page-item {% if p==page %}active{% endif %}">
-        <a class="page-link" href="?page={{ p }}">{{ p }}</a>
-      </li>
+
+  <!-- Таблица (десктоп) -->
+  <div class="table-responsive d-none d-md-block">
+    <table class="table table-sm align-middle">
+      <thead>
+        <tr>
+          <th>Username</th>
+          <th>Телефон</th>
+          <th style="min-width:280px;">Файл</th>
+          <th>Дата</th>
+          <th style="width:170px;"></th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for k in items %}
+        <tr>
+          <td>{{ k.username or '' }}</td>
+          <td>{{ k.phone or '—' }}</td>
+          <td class="text-break">{{ k.filename }}</td>
+          <td>{{ (k.created_at or k.created).strftime("%Y-%m-%d %H:%M") if (k.created_at or k.created) else '—' }}</td>
+          <td class="text-nowrap">
+            <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('kp.kp_preview', id=k.id) }}" target="_blank">Просмотр</a>
+            <a class="btn btn-sm btn-outline-primary"  href="{{ url_for('kp.kp_download', id=k.id) }}">Скачать</a>
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="5" class="text-center text-muted py-4">Записей нет</td></tr>
       {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Мобильный список (cards) -->
+  <div class="d-md-none">
+    <div class="d-flex flex-column gap-2">
+      {% for k in items %}
+        <div class="card">
+          <div class="card-body">
+            <div class="fw-semibold">{{ k.username or '' }}</div>
+            <div class="text-muted small mb-1">{{ k.phone or '—' }}</div>
+            <div class="text-break small">{{ k.filename }}</div>
+            <div class="text-muted small mb-2">
+              {{ (k.created_at or k.created).strftime("%Y-%m-%d %H:%M") if (k.created_at or k.created) else '—' }}
+            </div>
+            <div class="d-flex gap-2">
+              <a class="btn btn-outline-secondary flex-fill" href="{{ url_for('kp.kp_preview', id=k.id) }}" target="_blank">Просмотр</a>
+              <a class="btn btn-outline-primary flex-fill"  href="{{ url_for('kp.kp_download', id=k.id) }}">Скачать</a>
+            </div>
+          </div>
+        </div>
+      {% else %}
+        <div class="text-center text-muted py-4">Записей нет</div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- Пагинация -->
+  {% if pages and pages > 1 %}
+  <nav class="mt-3">
+    <ul class="pagination pagination-sm justify-content-center">
+      <li class="page-item {% if page <= 1 %}disabled{% endif %}">
+        <a class="page-link"
+           href="{{ url_for('kp.kp_list', page=page-1, **request.args.to_dict(flat=True)) }}">«</a>
+      </li>
+      {% for p in range(1, pages+1) %}
+        <li class="page-item {% if p == page %}active{% endif %}">
+          <a class="page-link"
+             href="{{ url_for('kp.kp_list', page=p, **request.args.to_dict(flat=True)) }}">{{ p }}</a>
+        </li>
+      {% endfor %}
+      <li class="page-item {% if page >= pages %}disabled{% endif %}">
+        <a class="page-link"
+           href="{{ url_for('kp.kp_list', page=page+1, **request.args.to_dict(flat=True)) }}">»</a>
+      </li>
     </ul>
   </nav>
+  {% endif %}
+
 </div>
-</form>
+
+<!-- Пресеты дат -->
+<script>
+(function() {
+  const from = document.querySelector('input[name="date_from"]');
+  const to   = document.querySelector('input[name="date_to"]');
+  const form = from.closest('form');
+
+  function fmt(d) {
+    const z = n => String(n).padStart(2,'0');
+    return d.getFullYear() + "-" + z(d.getMonth()+1) + "-" + z(d.getDate());
+  }
+  function setRange(days) {
+    const now = new Date();
+    const end = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+    const start = new Date(end); start.setUTCDate(start.getUTCDate() - (days-1));
+    from.value = fmt(start);
+    to.value   = fmt(end);
+    form.submit();
+  }
+  document.querySelector('[data-range="today"]')?.addEventListener('click', () => setRange(1));
+  document.querySelector('[data-range="yesterday"]')?.addEventListener('click', () => {
+    const now = new Date(); const y = new Date(now); y.setDate(y.getDate()-1);
+    from.value = to.value = fmt(y);
+    form.submit();
+  });
+  document.querySelector('[data-range="7"]')?.addEventListener('click', () => setRange(7));
+  document.querySelector('[data-range="30"]')?.addEventListener('click', () => setRange(30));
+})();
+</script>
 {% endblock %}

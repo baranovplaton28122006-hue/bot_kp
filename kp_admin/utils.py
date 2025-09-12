@@ -1,71 +1,109 @@
+# kp_admin/utils.py
+from __future__ import annotations
+import re
+import html as ihtml
+from typing import Optional
 
-import os, io
-from flask import current_app
-from slugify import slugify
-from xhtml2pdf import pisa
+# Телефон: допускаем пробелы/скобки/дефисы, берём 10–15 цифр
+PHONE_RE = re.compile(
+    r"(?:тел(?:ефон)?\s*[:\-]?\s*)?(\+?\d[\d\-\s().]{7,}\d)",
+    flags=re.IGNORECASE | re.UNICODE,
+)
 
-def allowed_file(filename: str) -> bool:
-    exts = current_app.config.get("ALLOWED_EXTENSIONS", {"pdf", "html"})
-    return "." in filename and filename.rsplit(".", 1)[1].lower() in exts
+# Telegram username: '@name' или 'Telegram @name'
+USERNAME_RE = re.compile(
+    r"(?:telegram\s*@|телеграм\s*@|@)([A-Za-z0-9_]{3,32})",
+    flags=re.IGNORECASE | re.UNICODE,
+)
 
-def ensure_uploads_folder():
-    folder = os.path.join(current_app.instance_path, current_app.config.get("UPLOAD_FOLDER", "uploads/kp"))
-    os.makedirs(folder, exist_ok=True)
-    return folder
+BAD_USERNAMES = {"mail", "email", "почта", "none", "нет"}
 
-def save_html_as_pdf(html: str, out_path: str) -> bool:
-    """
-    Simple HTML -> PDF using xhtml2pdf. Returns True/False.
-    """
-    with open(out_path, "wb") as f:
-        result = pisa.CreatePDF(io.StringIO(html), dest=f)
-    return not result.err
 
-def render_kp_html(lead, blocks: dict) -> str:
+def _strip_tags(html: str) -> str:
+    """Грубое удаление тегов + unescape + схлопывание пробелов."""
+    text = ihtml.unescape(html)
+    text = re.sub(r"<[^>]+>", " ", text)        # убрать теги
+    text = re.sub(r"\s+", " ", text).strip()    # схлопнуть пробелы
+    return text
+
+
+def _normalize_phone(raw: str) -> Optional[str]:
+    """Оставляем только цифры, приводим RU-номера к +7, валидируем длину."""
+    if not raw:
+        return None
+    digits = re.sub(r"\D+", "", raw)
+    if not digits:
+        return None
+
+    # Частые случаи
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]           # 8XXXXXXXXXX -> 7XXXXXXXXXX
+    elif len(digits) == 10 and digits.startswith("9"):
+        digits = "7" + digits               # 9XXXXXXXXX  -> 79XXXXXXXXX
+
+    # Допустимая длина международного номера
+    if not (10 <= len(digits) <= 15):
+        return None
+
+    if not digits.startswith(("7", "8", "9", "1", "2", "3", "4", "5", "6")):
+        # если что-то экзотическое — всё равно вернём с плюсом
+        pass
+
+    # финально добавляем +
+    if not digits.startswith("+"):
+        digits = "+" + digits
+    return digits
+
+
+def _sanitize_username(u: Optional[str]) -> Optional[str]:
+    if not u:
+        return None
+    u = u.strip().lstrip("@")
+    if not u:
+        return None
+    if u.lower() in BAD_USERNAMES:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_]{3,32}", u):
+        return None
+    return u
+
+
+def parse_kp_file_meta(path: str) -> dict:
     """
-    Render simple KP HTML from lead data + selected blocks.
+    Читает HTML-КП и пытается достать метаданные.
+    Возвращает dict: {phone, username, name?, chat_id?}
     """
-    title = f"КП для {lead.company or lead.contact_name or 'клиента'}"
-    items_html = "".join([f"<li><strong>{k}:</strong> {v}</li>" for k, v in blocks.items()])
-    body = f"""
-    <!doctype html>
-    <html lang="ru">
-      <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width,initial-scale=1" />
-        <title>{title}</title>
-        <style>
-          body{{font-family: Arial, sans-serif; margin: 24px;}}
-          header, footer{{border-top: 4px solid #22c55e; padding: 12px 0;}}
-          h1{{margin: 0 0 8px;}}
-          .meta{{color:#555; font-size:14px; margin-bottom:16px;}}
-          .section{{margin:16px 0; padding:12px; border:1px solid #eee; border-radius:8px;}}
-          ul{{margin:0; padding-left:20px;}}
-        </style>
-      </head>
-      <body>
-        <header>
-          <h1>{title}</h1>
-          <div class="meta">Email: {lead.email or '-'} • Тел: {lead.phone or '-'}</div>
-        </header>
-        <div class="section">
-          <h3>Параметры проекта</h3>
-          <ul>
-            <li>Тип сайта: {lead.site_type or '-'}</li>
-            <li>Цель: {lead.goal or '-'}</li>
-            <li>Аудитория: {lead.audience or '-'}</li>
-            <li>Бюджет: {lead.budget or '-'}</li>
-            <li>Срок: {lead.deadline or '-'}</li>
-          </ul>
-        </div>
-        <div class="section">
-          <h3>Выбранные блоки</h3>
-          <ul>{items_html}</ul>
-        </div>
-        <footer>
-          <small>Сформировано админ‑панелью • {slugify(title)}</small>
-        </footer>
-      </body>
-    </html>
-    """
-    return body
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read()
+    except UnicodeDecodeError:
+        with open(path, "r", encoding="cp1251", errors="ignore") as f:
+            raw = f.read()
+
+    text = _strip_tags(raw)
+
+    # Телефон
+    phone = None
+    m = PHONE_RE.search(text)
+    if m:
+        phone = _normalize_phone(m.group(1))
+
+    # Username
+    username = None
+    mu = USERNAME_RE.search(text)
+    if mu:
+        username = _sanitize_username(mu.group(1))
+
+    # Имя клиента (если хочешь — можно расширить по своим шаблонам)
+    name = None
+    # пример: "Клиент: Иван" или "Имя: …"
+    mn = re.search(r"(?:Клиент|Имя)\s*[:\-]\s*([A-Za-zА-Яа-яЁё0-9_ \-]{2,50})", text)
+    if mn:
+        name = mn.group(1).strip()
+
+    return {
+        "phone": phone,
+        "username": username,
+        "name": name,
+        # "chat_id": можно доставать, если ты где-то его пишешь в HTML
+    }

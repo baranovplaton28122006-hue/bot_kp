@@ -1,234 +1,372 @@
+import os
+import re
+from datetime import datetime, timedelta
+from io import StringIO, BytesIO
+import csv
 
-from flask import Blueprint, render_template, request, redirect, url_for, flash, send_from_directory, current_app, abort
-from flask_login import login_user, logout_user, login_required, current_user
-from .models import User, Lead, KPFile
+from flask import (
+    Blueprint, current_app, render_template, request,
+    redirect, url_for, send_file, flash, Response, abort
+)
+from flask_login import login_required, current_user, login_user, logout_user
+
 from . import db
-from .utils import ensure_uploads_folder, allowed_file, render_kp_html, save_html_as_pdf
-from werkzeug.utils import secure_filename
-import os, math, mimetypes, json, datetime
+from .models import KPFile, Lead, User
+from .utils import parse_kp_file_meta
 
-bp = Blueprint("routes", __name__)
+# NEW: для Excel
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
-@bp.route("/settings", methods=["GET", "POST"])
-@login_required
-def settings():
-    # Заглушка настроек, чтобы не падало.
-    # Позже можно расширить — сохранение в instance/config.py и т.п.
-    class Cfg:
-        BOT_TOKEN = current_app.config.get("BOT_TOKEN", "")
-        UPLOAD_FOLDER = current_app.config.get("UPLOAD_FOLDER", "uploads/kp")
-        API_KEY = current_app.config.get("API_KEY", "")
-    return render_template("admin/settings.html", cfg=Cfg())
+bp = Blueprint("kp", __name__)
 
-# ---------- Auth ----------
-@bp.route("/login", methods=["GET", "POST"])
-def login():
-    if request.method == "POST":
-        email = request.form.get("email", "").strip().lower()
-        password = request.form.get("password", "")
-        user = User.query.filter_by(email=email).first()
-        if user and user.check_password(password):
-            login_user(user, remember=True)
-            return redirect(url_for("routes.dashboard"))
-        flash("Неверный email или пароль", "danger")
-    return render_template("login.html")
+# ---------- helpers ----------
 
-@bp.route("/logout")
-@login_required
-def logout():
-    logout_user()
-    return redirect(url_for("routes.login"))
+def uploads_folder() -> str:
+    return os.path.abspath(
+        os.path.join(current_app.root_path, "..", current_app.config["UPLOAD_FOLDER"])
+    )
 
-# ---------- Dashboard ----------
-@bp.route("/")
-@login_required
-def dashboard():
-    leads_count = Lead.query.count()
-    kps_count = KPFile.query.count()
-    latest_leads = Lead.query.order_by(Lead.created_at.desc()).limit(5).all()
-    latest_kps = KPFile.query.order_by(KPFile.created_at.desc()).limit(5).all()
-    return render_template("admin/dashboard.html",
-                           leads_count=leads_count, kps_count=kps_count,
-                           latest_leads=latest_leads, latest_kps=latest_kps)
-
-@bp.route("/stats/counts")
-@login_required
-def stats_counts():
-    import datetime
-    from .models import Lead, KPFile
-    days = [datetime.date.today() - datetime.timedelta(days=i) for i in range(13, -1, -1)]
-    labels, leads, kps = [], [], []
-    for d in days:
-        d1 = datetime.datetime.combine(d, datetime.time.min)
-        d2 = datetime.datetime.combine(d, datetime.time.max)
-        labels.append(d.strftime("%Y-%m-%d"))
-        leads.append(Lead.query.filter(Lead.created_at >= d1, Lead.created_at <= d2).count())
-        kps.append(KPFile.query.filter(KPFile.created_at >= d1, KPFile.created_at <= d2).count())
-    from flask import jsonify
-    return jsonify({"labels": labels, "leads": leads, "kps": kps})
-
-
-# ---------- Leads ----------
-def _paginate(query, per_page=15):
-    page = max(int(request.args.get("page", 1)), 1)
+def paginate(query, per_page: int = 20):
+    page = max(int(request.args.get("page", 1) or 1), 1)
     total = query.count()
-    pages = math.ceil(total / per_page) if per_page else 1
+    pages = (total + per_page - 1) // per_page
     items = query.offset((page - 1) * per_page).limit(per_page).all()
     return items, page, pages, total
 
-@bp.route("/leads")
-@login_required
-def leads():
-    q = request.args.get("q", "").strip()
-    base = Lead.query
-    if q:
-        like = f"%{q}%"
-        base = base.filter((Lead.company.ilike(like)) | (Lead.contact_name.ilike(like)) | (Lead.email.ilike(like)) | (Lead.phone.ilike(like)))
-    base = base.order_by(Lead.created_at.desc())
-    items, page, pages, total = _paginate(base, per_page=20)
-    return render_template("admin/leads.html", items=items, page=page, pages=pages, total=total, q=q)
+# телефон из имени файла: KP_79061419500_20250909_1.html
+_FN_PHONE = re.compile(r"^KP_(\d{11,12})_", re.IGNORECASE)
 
-@bp.route("/leads/new", methods=["GET", "POST"])
-@login_required
-def lead_new():
-    if request.method == "POST":
-        data = {k: request.form.get(k) for k in ["company","contact_name","phone","email","site_type","goal","audience","budget","deadline","notes"]}
-        lead = Lead(**data)
+def _sanitize_username(u: str | None) -> str | None:
+    if not u:
+        return None
+    u = u.strip().lstrip("@")
+    if u.lower() in {"mail", "email", "почта"}:
+        return None
+    return u if re.fullmatch(r"[A-Za-z0-9_]{3,32}", u) else None
+
+def _fallback_from_filename(filename: str) -> dict:
+    m = _FN_PHONE.match(filename or "")
+    return {"phone": ("+" + m.group(1)) if m else None}
+
+def _parse_date_any(s: str | None) -> datetime | None:
+    s = (s or "").strip()
+    if not s:
+        return None
+    for fmt in ("%d.%m.%Y", "%Y-%m-%d", "%d/%m/%Y", "%d.%m.%y"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            pass
+    m = re.fullmatch(r"(\d{1,2})[.\-/](\d{1,2})", s)
+    if m:
+        d, mo = map(int, m.groups())
+        today = datetime.utcnow()
+        return datetime(today.year, mo, d)
+    m = re.search(r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})", s)
+    if m:
+        d, mo, y = m.groups()
+        d, mo, y = int(d), int(mo), int(y)
+        if y < 100:
+            y += 2000
+        return datetime(y, mo, d)
+    return None
+
+def get_or_create_lead(meta: dict) -> Lead:
+    q = Lead.query
+    if meta.get("chat_id"):
+        q = q.filter(Lead.tg_user_id == str(meta["chat_id"]))
+    elif meta.get("phone"):
+        q = q.filter(Lead.phone == meta["phone"])
+    else:
+        q = q.filter(Lead.username == (meta.get("username") or ""))
+
+    lead = q.first()
+    if not lead:
+        lead = Lead(
+            tg_user_id=str(meta.get("chat_id") or ""),
+            username=meta.get("username"),
+            phone=meta.get("phone"),
+            name=meta.get("name"),
+            email=None,
+        )
         db.session.add(lead)
-        db.session.commit()
-        flash("Лид создан", "success")
-        return redirect(url_for("routes.leads"))
-    return render_template("admin/lead_form.html", lead=None)
+        db.session.flush()
+    else:
+        if meta.get("username") and not lead.username:
+            lead.username = meta["username"]
+        if meta.get("phone") and not lead.phone:
+            lead.phone = meta["phone"]
+        if meta.get("name") and not lead.name:
+            lead.name = meta["name"]
+    return lead
 
-@bp.route("/leads/<int:lead_id>", methods=["GET", "POST"])
-@login_required
-def lead_detail(lead_id):
-    lead = Lead.query.get_or_404(lead_id)
-    if request.method == "POST":
-        for k in ["company","contact_name","phone","email","site_type","goal","audience","budget","deadline","notes"]:
-            setattr(lead, k, request.form.get(k))
-        db.session.commit()
-        flash("Лид обновлён", "success")
-        return redirect(url_for("routes.lead_detail", lead_id=lead.id))
-    return render_template("admin/lead_form.html", lead=lead)
+def rescan_new_files(silent: bool = True) -> int:
+    folder = uploads_folder()
+    os.makedirs(folder, exist_ok=True)
 
-@bp.route("/leads/<int:lead_id>/delete", methods=["POST"])
-@login_required
-def lead_delete(lead_id):
-    lead = Lead.query.get_or_404(lead_id)
-    db.session.delete(lead)
-    db.session.commit()
-    flash("Лид удалён", "info")
-    return redirect(url_for("routes.leads"))
+    all_files = [f for f in os.listdir(folder) if f.lower().endswith((".html", ".htm"))]
+    added = 0
 
-@bp.route("/leads/<int:lead_id>/export.json")
-@login_required
-def lead_export_json(lead_id):
-    lead = Lead.query.get_or_404(lead_id)
-    data = {k: getattr(lead, k) for k in ["id","company","contact_name","phone","email","site_type","goal","audience","budget","deadline","notes"]}
-    return (json.dumps(data, ensure_ascii=False, indent=2), 200, {"Content-Type": "application/json; charset=utf-8"})
-
-# ---------- KP Files ----------
-@bp.route("/kp")
-@login_required
-def kp_index():
-    base = KPFile.query.order_by(KPFile.created_at.desc())
-    items, page, pages, total = _paginate(base, per_page=20)
-    return render_template("admin/kp_list.html", items=items, page=page, pages=pages, total=total)
-
-@bp.route("/kp/upload", methods=["POST"])
-@login_required
-def kp_upload():
-    file = request.files.get("file")
-    if not file or file.filename == "":
-        flash("Не выбран файл", "warning")
-        return redirect(url_for("routes.kp_index"))
-    if not allowed_file(file.filename):
-        flash("Недопустимый формат", "danger")
-        return redirect(url_for("routes.kp_index"))
-    folder = ensure_uploads_folder()
-    filename = secure_filename(file.filename)
-    path = os.path.join(folder, filename)
-    file.save(path)
-    size = os.path.getsize(path)
-    mtype = mimetypes.guess_type(path)[0] or "application/octet-stream"
-    kp = KPFile(filename=filename, size_bytes=size, mimetype=mtype)
-    db.session.add(kp)
-    db.session.commit()
-    flash("Файл загружен", "success")
-    return redirect(url_for("routes.kp_index"))
-
-@bp.route("/kp/download/<int:kp_id>")
-@login_required
-def kp_download(kp_id):
-    kp = KPFile.query.get_or_404(kp_id)
-    folder = ensure_uploads_folder()
-    path = os.path.join(folder, kp.filename)
-    if not os.path.exists(path):
-        abort(404)
-    return send_from_directory(folder, kp.filename, as_attachment=True)
-
-@bp.route("/kp/delete/<int:kp_id>", methods=["POST"])
-@login_required
-def kp_delete(kp_id):
-    kp = KPFile.query.get_or_404(kp_id)
-    folder = ensure_uploads_folder()
-    path = os.path.join(folder, kp.filename)
-    if os.path.exists(path):
-        os.remove(path)
-    db.session.delete(kp)
-    db.session.commit()
-    flash("КП удалено", "info")
-    return redirect(url_for("routes.kp_index"))
-
-@bp.route("/kp/generate/<int:lead_id>", methods=["POST"])
-@login_required
-def kp_generate(lead_id):
-    lead = Lead.query.get_or_404(lead_id)
-    blocks = request.form.to_dict() or {"Стоимость": "Индивидуально", "Поддержка": "30 дней", "Срок разработки": "2-4 недели"}
-    html = render_kp_html(lead, blocks)
-    folder = ensure_uploads_folder()
-    base_name = f"KP_{lead.id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    html_name = base_name + ".html"
-    html_path = os.path.join(folder, html_name)
-    with open(html_path, "w", encoding="utf-8") as f:
-        f.write(html)
-
-    pdf_name = base_name + ".pdf"
-    pdf_path = os.path.join(folder, pdf_name)
-    pdf_ok = save_html_as_pdf(html, pdf_path)
-
-    filename = pdf_name if pdf_ok else html_name
-    final_path = pdf_path if pdf_ok else html_path
-    size = os.path.getsize(final_path)
-    mtype = "application/pdf" if pdf_ok else "text/html"
-
-    kp = KPFile(lead_id=lead.id, filename=filename, size_bytes=size, mimetype=mtype)
-    db.session.add(kp)
-    db.session.commit()
-    flash("КП сгенерировано" + (" (PDF)" if pdf_ok else " (HTML)"), "success")
-    return redirect(url_for("routes.kp_index"))
-
-# ---------- Maintenance / Bulk ----------
-@bp.route("/maintenance/bulk_delete", methods=["POST"])
-@login_required
-def bulk_delete():
-    ids = request.form.getlist("ids")
-    if not ids:
-        flash("Не выбраны элементы", "warning")
-        return redirect(request.referrer or url_for("routes.dashboard"))
-    for sid in ids:
-        kp = KPFile.query.get(sid)
-        if kp:
-            folder = ensure_uploads_folder()
-            path = os.path.join(folder, kp.filename)
-            if os.path.exists(path):
-                os.remove(path)
-            db.session.delete(kp)
+    for name in sorted(all_files):
+        if KPFile.query.filter_by(filename=name).first():
             continue
-        lead = Lead.query.get(sid)
-        if lead:
-            db.session.delete(lead)
-    db.session.commit()
-    flash("Удаление выполнено", "info")
-    return redirect(request.referrer or url_for("routes.dashboard"))
+        path = os.path.join(folder, name)
+
+        try:
+            meta = (parse_kp_file_meta(path) or {})
+        except Exception:
+            meta = {}
+
+        fb = _fallback_from_filename(name)
+        if fb.get("phone") and not meta.get("phone"):
+            meta["phone"] = fb["phone"]
+        meta["username"] = _sanitize_username(meta.get("username"))
+
+        lead = get_or_create_lead({
+            "chat_id": meta.get("chat_id"),
+            "username": meta.get("username"),
+            "phone": meta.get("phone"),
+            "name": meta.get("name"),
+        })
+
+        db.session.add(KPFile(
+            filename=name,
+            mimetype="text/html",
+            phone=meta.get("phone"),
+            chat_id=str(meta.get("chat_id") or ""),
+            username=meta.get("username"),
+            name=meta.get("name"),
+            created_at=datetime.utcnow(),
+            lead=lead,
+        ))
+        added += 1
+
+    if added:
+        db.session.commit()
+
+    if not silent:
+        flash(f"Сканирую: {uploads_folder()}", "info")
+        flash(f"Найдено HTML: {len(all_files)}, добавлено: {added}", "success" if added else "warning")
+        if len(all_files) == 0:
+            flash("В папке нет *.html. Положи файлы и повтори.", "warning")
+    return added
+
+# ---------- routes ----------
+
+@bp.route("/", endpoint="root")
+def index_root():
+    if current_user.is_authenticated:
+        return redirect(url_for("kp.kp_list"))
+    return redirect(url_for("kp.login"))
+
+@bp.route("/login", methods=["GET", "POST"], endpoint="login")
+def login():
+    if request.method == "GET":
+        return render_template("login.html")
+    email = (request.form.get("email") or "").strip().lower()
+    password = request.form.get("password") or ""
+    if not email or not password:
+        flash("Введите email и пароль", "danger")
+        return render_template("login.html"), 400
+    user = User.query.filter_by(email=email).first()
+    if not user or not user.check_password(password):
+        flash("Неверный email или пароль", "danger")
+        return render_template("login.html"), 401
+    login_user(user, remember=True)
+    return redirect(url_for("kp.kp_list"))
+
+@bp.route("/logout", endpoint="logout")
+@login_required
+def logout():
+    logout_user()
+    flash("Вы вышли из аккаунта", "success")
+    return redirect(url_for("kp.login"))
+
+@bp.route("/kp", endpoint="kp_list")
+@login_required
+def kp_list():
+    q = KPFile.query.order_by(KPFile.created_at.desc())
+
+    phone = (request.args.get("phone") or "").strip()
+    if phone:
+        q = q.filter(KPFile.phone.contains(phone))
+
+    d_from = _parse_date_any(request.args.get("date_from"))
+    d_to   = _parse_date_any(request.args.get("date_to"))
+    if d_from:
+        q = q.filter(KPFile.created_at >= d_from)
+    if d_to:
+        q = q.filter(KPFile.created_at < (d_to + timedelta(days=1)))
+
+    items, page, pages, total = paginate(q, per_page=20)
+
+    now = datetime.utcnow()
+    today_start = datetime.combine(now.date(), datetime.min.time())
+    stat = {
+        "today": KPFile.query.filter(KPFile.created_at >= today_start).count(),
+        "w7":    KPFile.query.filter(KPFile.created_at >= now - timedelta(days=7)).count(),
+        "w30":   KPFile.query.filter(KPFile.created_at >= now - timedelta(days=30)).count(),
+        "w90":   KPFile.query.filter(KPFile.created_at >= now - timedelta(days=90)).count(),
+        "all":   KPFile.query.count(),
+    }
+
+    to_iso = lambda d: d.strftime("%Y-%m-%d") if d else ""
+    return render_template(
+        "admin/kp_list.html",
+        items=items, page=page, pages=pages, total=total, stat=stat,
+        date_from_iso=to_iso(d_from), date_to_iso=to_iso(d_to),
+        phone_value=phone,
+    )
+
+@bp.route("/kp/rescan", methods=["POST", "GET"], endpoint="kp_rescan")
+@login_required
+def kp_rescan():
+    rescan_new_files(silent=False)
+    return redirect(url_for("kp.kp_list", **request.args))
+
+# ---- CSV (улучшено: ; и заголовки на русском) ----
+@bp.route("/kp/csv", endpoint="kp_csv")
+@login_required
+def kp_csv():
+    q = KPFile.query.order_by(KPFile.created_at.desc())
+
+    phone = (request.args.get("phone") or "").strip()
+    if phone:
+        q = q.filter(KPFile.phone.contains(phone))
+
+    d_from = _parse_date_any(request.args.get("date_from"))
+    d_to   = _parse_date_any(request.args.get("date_to"))
+    if d_from:
+        q = q.filter(KPFile.created_at >= d_from)
+    if d_to:
+        q = q.filter(KPFile.created_at < (d_to + timedelta(days=1)))
+
+    si = StringIO()
+    w = csv.writer(si, delimiter=';')
+    w.writerow(["Username", "Телефон", "Файл", "Дата"])
+    for k in q.all():
+        w.writerow([
+            k.username or "",
+            k.phone or "",
+            k.filename or "",
+            (k.created_at.strftime("%Y-%m-%d %H:%M") if k.created_at else "")
+        ])
+
+    return Response(
+        si.getvalue().encode("utf-8-sig"),
+        mimetype="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=kp.csv"}
+    )
+
+# ---- XLSX красивый ----
+@bp.route("/kp/xlsx", endpoint="kp_xlsx")
+@login_required
+def kp_xlsx():
+    q = KPFile.query.order_by(KPFile.created_at.desc())
+
+    phone = (request.args.get("phone") or "").strip()
+    if phone:
+        q = q.filter(KPFile.phone.contains(phone))
+
+    d_from = _parse_date_any(request.args.get("date_from"))
+    d_to   = _parse_date_any(request.args.get("date_to"))
+    if d_from:
+        q = q.filter(KPFile.created_at >= d_from)
+    if d_to:
+        q = q.filter(KPFile.created_at < (d_to + timedelta(days=1)))
+
+    items = q.all()
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "КП"
+
+    # Шапка
+    headers = ["Username", "Телефон", "Файл", "Дата", "Просмотр", "Скачать"]
+    ws.append(headers)
+
+    # Стили шапки
+    head_font = Font(bold=True, color="FFFFFF")
+    head_fill = PatternFill("solid", fgColor="4F81BD")
+    thin = Side(border_style="thin", color="D9D9D9")
+    for col in range(1, len(headers)+1):
+        cell = ws.cell(row=1, column=col)
+        cell.font = head_font
+        cell.fill = head_fill
+        cell.alignment = Alignment(vertical="center", horizontal="center")
+        cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
+
+    base_url = request.host_url.rstrip("/")
+
+    # Данные
+    for k in items:
+        preview_url = url_for("kp.kp_preview", id=k.id, _external=True)
+        download_url = url_for("kp.kp_download", id=k.id, _external=True)
+        row = [
+            k.username or "",
+            k.phone or "",
+            k.filename or "",
+            (k.created_at.strftime("%Y-%m-%d %H:%M") if k.created_at else ""),
+            "Просмотр",
+            "Скачать",
+        ]
+        ws.append(row)
+        r = ws.max_row
+        # Гиперссылки
+        ws.cell(row=r, column=5).hyperlink = preview_url
+        ws.cell(row=r, column=5).style = "Hyperlink"
+        ws.cell(row=r, column=6).hyperlink = download_url
+        ws.cell(row=r, column=6).style = "Hyperlink"
+
+    # Ширины колонок
+    ws.column_dimensions["A"].width = 18
+    ws.column_dimensions["B"].width = 18
+    ws.column_dimensions["C"].width = 50
+    ws.column_dimensions["D"].width = 20
+    ws.column_dimensions["E"].width = 15
+    ws.column_dimensions["F"].width = 15
+
+    # Выравнивание/перенос для имени файла
+    for row in ws.iter_rows(min_row=2, min_col=3, max_col=3):
+        for cell in row:
+            cell.alignment = Alignment(wrap_text=True, vertical="center")
+
+    # Автофильтр и фиксация шапки
+    ws.auto_filter.ref = f"A1:F{ws.max_row}"
+    ws.freeze_panes = "A2"
+
+    # Границы для тела
+    for r in range(2, ws.max_row+1):
+        for c in range(1, 7):
+            ws.cell(row=r, column=c).border = Border(top=thin, left=thin, right=thin, bottom=thin)
+
+    # В буфер
+    bio = BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+
+    return send_file(
+        bio,
+        as_attachment=True,
+        download_name="kp.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+@bp.route("/kp/<int:id>/download", endpoint="kp_download")
+@login_required
+def kp_download(id: int):
+    kpf = KPFile.query.get_or_404(id)
+    path = os.path.join(uploads_folder(), kpf.filename)
+    if not os.path.exists(path):
+        abort(404, "Файл не найден на диске")
+    return send_file(path, as_attachment=True, download_name=kpf.filename, mimetype="text/html")
+
+@bp.route("/kp/<int:id>/preview", endpoint="kp_preview")
+@login_required
+def kp_preview(id: int):
+    kpf = KPFile.query.get_or_404(id)
+    path = os.path.join(uploads_folder(), kpf.filename)
+    if not os.path.exists(path):
+        abort(404, "Файл не найден на диске")
+    return send_file(path, as_attachment=False, mimetype="text/html")
